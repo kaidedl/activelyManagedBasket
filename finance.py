@@ -2,13 +2,12 @@ import numpy as np
 from scipy.stats import norm
 
 
-def basket_price(spots, vols, correls, w, T, K):
-    n = len(w)
-    M = np.dot(spots, w)
+def basket_price(vols, correls, w, T, K):
+    M = np.sum(w)
     V2 = 0
-    for i in range(n):
-        for j in range(n):
-            V2 += w[i] * w[j] * spots[i] * spots[j] * np.exp(vols[i] * vols[j] * correls[i][j] * T)
+    for i in range(len(w)):
+        for j in range(len(w)):
+            V2 += w[i] * w[j] * np.exp(vols[i] * vols[j] * correls[i][j] * T)
 
     m = 2 * np.log(M) - 0.5 * np.log(V2)
     v2 = np.log(V2) - 2 * np.log(M)
@@ -36,16 +35,11 @@ def vv_put_orig(a,b,ks):
     return r
 
 def phi_heston2_pre(omega, kappa, theta, alpha, rho, T):
-    z=omega
-    tau=T
-    vbar=theta
-    lamb=kappa
-    eta=alpha
-    a0=lamb-rho*eta*z*1j
-    gamma=np.power(eta**2*(z**2+z*1j)+a0*a0, 0.5)
+    a0=kappa-rho*alpha*omega*1j
+    gamma=np.power(alpha**2*(omega**2+omega*1j)+a0*a0, 0.5)
     G=(a0-gamma)/(a0+gamma)
-    a1=1.0/eta/eta*((1-np.exp(-gamma*tau))/(1-G*np.exp(-gamma*tau)))*(a0-gamma)
-    a2=lamb*vbar/eta/eta*(tau*(a0-gamma)-2*np.log((1-G*np.exp(-gamma*tau))/(1-G)))
+    a1=1.0/alpha/alpha*((1-np.exp(-gamma*T))/(1-G*np.exp(-gamma*T)))*(a0-gamma)
+    a2=kappa*theta/alpha/alpha*(T*(a0-gamma)-2*np.log((1-G*np.exp(-gamma*T))/(1-G)))
     return a1, a2
 
 def phi_heston2(omega, kappa, theta, alpha, rho, V0, T):
@@ -139,3 +133,13 @@ def test():
     va = valuatorAtm(np.array([[V0, kappa, theta, alpha, rho]]), T)
     vav = va.value(0, V0, S0)
     return vav - res
+
+
+
+if __name__ == '__main__':
+    vols = np.array([0.2, 0.3, 0.4])
+    correls = np.array([[1.0, 0.7, 0.5],
+                        [0.7, 1.0, 0.4],
+                        [0.5, 0.4, 1.0]])
+    w = np.array([0.3, 0.3, 0.4])
+    print(basket_price(vols, correls, w, 1, 1))

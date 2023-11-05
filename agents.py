@@ -15,19 +15,34 @@ from copy import deepcopy
 from collections import deque
 
 
+class PolicyNoChange:
+    def action(self, states):
+        n_sim = states.weights.shape[0]
+        return np.zeros(n_sim)
+
+
 class PolicyRandom:
     def __init__(self, n_assets):
         self.n_actions = 1 + n_assets * (n_assets - 1)
 
     def action(self, states):
-        n_sims = states.shape[0]
+        n_sims = states.weights.shape[0]
         return np.random.choice(self.n_actions, size=n_sims)
 
 
-class PolicyNoChange:
+class PolicyGreedy:
+    def __init__(self, K, heston_params, p_low, p_high, T, num_periods):
+        self.K = K
+        self.heston_params = heston_params
+        self.p_low = p_low
+        self.p_high = p_high
+        self.T = T
+        self.num_periods = num_periods
+
     def action(self, states):
-        n_sim = states.shape[0]
-        return np.zeros(n_sim)
+        T_rem = self.T * (self.num_periods - states.time - 1) / self.num_periods
+        actions, dist = q_approx_all(states, self.K, self.heston_params, T_rem, self.p_low, self.p_high)
+        return np.argmax(dist, axis=1)
 
 
 class PolicyDqn:
@@ -103,22 +118,8 @@ class PolicyDqn:
         pass
 
 
-class PolicyGreedy:
-    def __init__(self, K, heston_params, p_low, p_high, T, num_periods):
-        self.K = K
-        self.heston_params = heston_params
-        self.p_low = p_low
-        self.p_high = p_high
-        self.T = T
-        self.num_periods = num_periods
-
-    def action(self, states):
-        T_rem = self.T * (self.num_periods - states.time - 1) / self.num_periods
-        actions, dist = q_approx_all(states, self.K, self.heston_params, T_rem, self.p_low, self.p_high)
-        return np.argmax(dist, axis=1)
-
-
 class PolicyLS:
+    # live=red (neu brown), neutral=black (neu blue), earth=green/yellow
     def __init__(self, policy, S, V, C, initial_weights, K, T):
         self.K = K
         self.T = T
@@ -174,48 +175,46 @@ class PolicyLS:
         return action_indices
 
 def q_approx_all(states, K, heston_params, T_rem, p_low, p_high):
-    n, m = states.spots.shape
+    n, m = states.weights.shape
     #va = finance.valuatorAtm(heston_params, T_rem)
     dist = np.zeros((n, 1+m*(m-1)))
     for i in range(n):
-        state = State(states.time, states.spots[i], states.variances[i], states.correlations[i], states.weights[i])
+        state = State(states.time, states.variances[i], states.correlations[i], states.weights[i])
         actions, dist[i] = q_approx(state, K, heston_params, T_rem, p_low, p_high, None)
     return actions, dist
 
 
 def q_approx(state, K, heston_params, T_rem, p_low, p_high, va):
-    spots = state.spot
+    n = heston_params.shape[0]
+    spot = 1 #we can assume that the current spot of every asset is 1
     V0s = state.variance
     correls = state.correlation
     w = state.weight
 
-    B = np.dot(w, spots)
-    n = heston_params.shape[0]
+    B = np.sum(w)
     vols = []
     for i in range(n):
         _, kappa, theta, alpha, rho = heston_params[i]
-        price = va.value(i, V0s[i], spots[i]) if va else finance.value(spots[i], [spots[i]], V0s[i], kappa, theta, alpha, rho, T_rem)[0]
+        price = va.value(i, V0s[i], spot) if va else finance.value(spot, [spot], V0s[i], kappa, theta, alpha, rho, T_rem)[0]
         q = -1  # put
         num_it = 1
         iv = py_lets_be_quickly_rational.implied_volatility_from_a_transformed_rational_guess_with_limited_iterations(
-            price, spots[i], spots[i], T_rem, q, num_it)
+            price, spot, spot, T_rem, q, num_it)
         vols.append(iv)
 
     actions = [(0,0)] + [(i, j) for i in range(n) for j in range(n) if i != j]
-    q_values = [finance.basket_price(spots, vols, correls, w, T_rem, K)]
+    q_values = [finance.basket_price(vols, correls, w, T_rem, K)]
     for i_inc, i_dec in actions[1:]:
-        p_inc = w[i_inc] * spots[i_inc] / B
-        p_dec = w[i_dec] * spots[i_dec] / B
+        p_inc = w[i_inc] / B
+        p_dec = w[i_dec] / B
         change = min(0.05, min(p_high - p_inc, p_dec - p_low))
         if change <= 0:
             q_values.append(q_values[0])
         else:
-            w_inc_orig = w[i_inc]
-            w_dec_orig = w[i_dec]
-            w[i_inc] = (p_inc + change) * B / spots[i_inc]
-            w[i_dec] = (p_dec - change) * B / spots[i_dec]
-            q_values.append(finance.basket_price(spots, vols, correls, w, T_rem, K))
-            w[i_inc] = w_inc_orig
-            w[i_dec] = w_dec_orig
+            w[i_inc] = (p_inc + change) * B
+            w[i_dec] = (p_dec - change) * B
+            q_values.append(finance.basket_price(vols, correls, w, T_rem, K))
+            w[i_inc] = p_inc * B
+            w[i_dec] = p_dec * B
 
     return actions, np.array(q_values)

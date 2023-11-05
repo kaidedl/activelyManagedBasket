@@ -62,29 +62,28 @@ class Env:
         pass
 
     @staticmethod
-    def update_weight(spots, weights, actions_indices):
-        num_sims, num_assets = spots.shape
+    def update_weight(weights, actions_indices):
+        num_sims, num_assets = weights.shape
         pairs = [(i,j) for i in range(num_assets) for j in range(num_assets) if i!=j]
         action_decoder = {i+1: pairs[i] for i in range(len(pairs))}
         action_decoder[0] = (0, 0)
         updated_weights = deepcopy(weights)
         for i in range(num_sims):
             w = updated_weights[i]
-            spots = spots[i]
-            B = np.dot(w, spots)
+            B = np.sum(w)
 
             i_inc, i_dec = action_decoder[actions_indices[i]]
             if i_inc!=0 or i_dec!=0:
-                p_inc = w[i_inc] * spots[i_inc] / B
-                p_dec = w[i_dec] * spots[i_dec] / B
+                p_inc = w[i_inc] / B
+                p_dec = w[i_dec] / B
                 change = min(0.05, min(Env.p_high - p_inc, p_dec - Env.p_low))
-                w[i_inc] = (p_inc + change) * B / spots[i_inc]
-                w[i_dec] = (p_dec - change) * B / spots[i_dec]
+                w[i_inc] = (p_inc + change) * B
+                w[i_dec] = (p_dec - change) * B
         return updated_weights
 
     @staticmethod
     def compute_payoff(states, K):
-        B = np.sum(states.weights * states.spots, axis=1)
+        B = np.sum(states.weights, axis=1)
         payoff = np.maximum(B - K, 0)
         sd = np.std(payoff) / len(B)**0.5
         return np.mean(payoff) - 2*sd, np.mean(payoff) + 2*sd
