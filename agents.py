@@ -5,6 +5,7 @@ from env import Env
 
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
+from xgboost import XGBRegressor
 
 from keras.models import Sequential
 from keras.layers import Dense
@@ -22,12 +23,12 @@ class PolicyNoChange:
 
 
 class PolicyRandom:
-    def __init__(self, n_assets):
-        self.n_actions = 1 + n_assets * (n_assets - 1)
+    def __init__(self, num_assets):
+        self.num_actions = 1 + num_assets * (num_assets - 1)
 
     def action(self, states):
-        n_sims = states.weights.shape[0]
-        return np.random.choice(self.n_actions, size=n_sims)
+        num_sims = states.weights.shape[0]
+        return np.random.choice(self.num_actions, size=num_sims)
 
 
 class PolicyGreedy:
@@ -63,7 +64,7 @@ class PolicyDqn:
 
     def build_network(self):
         model = Sequential()
-        model.add(Dense(256, activation='relu', input_shape=self.num_flat_state))
+        model.add(Dense(256, activation='relu', input_shape=(self.num_flat_state,)))
         model.add(Dense(256, activation='relu'))
         model.add(Dense(self.num_actions, activation='linear'))
         model.compile(loss='mse', optimizer=Adam())
@@ -119,7 +120,6 @@ class PolicyDqn:
 
 
 class PolicyLS:
-    # live=red (neu brown), neutral=black (neu blue), earth=green/yellow
     def __init__(self, policy, S, V, C, initial_weights, K, T):
         self.K = K
         self.T = T
@@ -127,12 +127,15 @@ class PolicyLS:
         self.num_periods, self.num_sims, self.num_assets = S.shape
         self.num_actions = 1 + self.num_assets*(self.num_assets-1)
         self.states = []
+        self.afterstate_weights = []
         weights = deepcopy(initial_weights)
         for i in range(self.num_periods):
-            self.states.append(States(i, S[i], V[i], C[i], weights))
+            weights = weights * (S[i] if i==0 else S[i]/S[i-1])
+            self.states.append(States(i, V[i], C[i], weights))
             if i < self.num_periods-1:
                 action_indices = policy.action(self.states[-1])
-                weights = Env.update_weight(self.states[-1].spots, self.states[-1].weights, action_indices)
+                weights = Env.update_weight(weights, action_indices)
+                self.afterstate_weights.append(weights)
 
         self.flat_row, self.flat_col = np.triu_indices(self.num_assets, k=1)
         self.models = []
@@ -140,39 +143,40 @@ class PolicyLS:
 
     def train(self):
         for i in range(self.num_periods-2, -1, -1):
-            self.models.append([])
-            flat_correlation = self.states[i].correlations[:, self.flat_row, self.flat_col].T
-            T_rem = self.T * (self.num_periods - i - 1) / self.num_periods
-            X = np.concatenate([self.states[i].spots, self.states[i].variances, flat_correlation,
-                                self.states[i].weights], axis=1)
+            flat_correlation = self.states[i].correlations[:, self.flat_row, self.flat_col]
+            X = np.concatenate([self.states[i].variances**0.5, flat_correlation, self.afterstate_weights[i]], axis=1) # add t_rem?
             F = PolynomialFeatures(2).fit_transform(X)
-            for action in range(self.num_actions):
-                action_indices = action * np.ones(self.num_sims)
-                updated_weights = Env.update_weight(self.states[i].spots, self.states[i].weights, action_indices)
-                if i==self.num_periods-2:
-                    y = np.maximum(np.sum(updated_weights * self.states[i+1].spots, axis=1) - self.K, 0)
-                else:
-                    flat_correlation = self.states[i+1].correlations[:, self.flat_row, self.flat_col].T
-                    next_X = np.concatenate([self.states[i+1].spots, self.states[i+1].variances, flat_correlation, updated_weights], axis=1)
-                    next_F = PolynomialFeatures(2).fit_transform(next_X)
-                    y = np.maximum(self.value(self.models[-2], next_F), axis=1)
-                model = LinearRegression().fit(F, y)
-                self.models[-1].append(model)
+            if i==self.num_periods-2:
+                B = np.sum(self.states[i+1].weights, axis=1)
+                y = np.maximum(B - self.K, 0)
+            else:
+                # TD learning
+                ys = self.value(self.models[-1], self.states[i+1])
+                y = np.max(ys, axis=1)
+            # model = XGBRegressor(n_estimators=100, max_depth=5, eta=0.1, subsample=0.7, colsample_bytree=1.0)
+            # model.fit(F, y)
+            model = LinearRegression().fit(F, y)
+            self.models.append(model)
         self.models = list(reversed(self.models))
 
-    def value(self, models_per_action, F):
-        v = np.zeros((self.num_sims, self.num_actions))
-        for i in range(self.num_actions):
-            v[:, i] = models_per_action[i].predict(F)
-        return v
+    def value(self, next_model, next_states):
+        num_sims = next_states.variances.shape[0]
+        next_flat_correlation = next_states.correlations[:, self.flat_row, self.flat_col]
+        ys = np.zeros((num_sims, self.num_actions))
+        for j in range(self.num_actions):
+            action_indices = j * np.ones(num_sims)
+            next_afterstate_weights = Env.update_weight(next_states.weights, action_indices)
+            next_X = np.concatenate([next_states.variances**0.5, next_flat_correlation, next_afterstate_weights],
+                                    axis=1)
+            next_F = PolynomialFeatures(2).fit_transform(next_X)
+            ys[:, j] = next_model.predict(next_F)
+        return ys
 
     def action(self, states):
         i = states.time
-        flat_correlation = states.correlations[:, self.flat_row, self.flat_col].T
-        X = np.concatenate([states.spots, states.variances, flat_correlation, states.weights], axis=1)
-        F = PolynomialFeatures(2).fit_transform(X)
-        action_indices = np.argmax(self.value(self.models[i], F), axis=1)
+        action_indices = np.argmax(self.value(self.models[i], states), axis=1)
         return action_indices
+
 
 def q_approx_all(states, K, heston_params, T_rem, p_low, p_high):
     n, m = states.weights.shape
